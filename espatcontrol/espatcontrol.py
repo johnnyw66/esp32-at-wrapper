@@ -17,7 +17,8 @@ https://www.espressif.com/sites/default/files/documentation/4b-esp8266_at_comman
 
 * Author(s): ladyada
 
-Modified for MicroPython to work with ESP32C3 SuperMini-
+Portions modified for MicroPython RP2350 and Yukon boads. Tested with an ESP32C3 SuperMini-
+with firmware - AT version:3.3.0.0(3b13d04 - ESP32C3 - May  8 2024 08:21:54)
 """
 
 
@@ -27,7 +28,6 @@ import time
 
 try:
     from typing import Optional, Dict, Union, List
-    #import busio
 except ImportError:
     pass
 
@@ -99,7 +99,6 @@ class ESP_ATcontrol:
         self._initialized = False
         self._conntype = None
         self._use_cipstatus = use_cipstatus
-        print("DONE INIT")
 
     def begin(self) -> None:
         """Initialize the module by syncing, resetting if necessary, setting up
@@ -107,17 +106,14 @@ class ESP_ATcontrol:
         SSL support. Required before using the module but we dont do in __init__
         because this can throw an exception."""
         # Connect and sync
-        print("begin!!!!")
         for _ in range(3):
-            print("TRY", _)
             try:
                 self.echo(False)
                 # set flow control if required
-                print("BAUD RATE ",self._run_baudrate)
                 self.baudrate = self._run_baudrate
                 # get and cache versionstring
-                print("GET VERSION")
-                self.get_version()
+                version = self.get_version()
+                print(f"VERSION {version}")
                 try:
                     self.at_response("AT+CWSTATE?", retries=1, timeout=3)
                 except OKError:
@@ -127,7 +123,7 @@ class ESP_ATcontrol:
                         print("No CWSTATE support, using CIPSTATUS, it's ok!")
 
                 self._initialized = True
-                print("INITIALIZED DONE")
+                print(f"INITIALIZED COMPLETE - {self.baudrate}, {self.version}")
                 return
             except OKError:
                 pass  # retry
@@ -225,9 +221,7 @@ class ESP_ATcontrol:
     def get_version(self) -> Union[str, None]:
         """Request the AT firmware version string and parse out the
         version number"""
-        print("get_version---->")
         reply = self.at_response("AT+GMR", timeout=3).strip(b"\r\n")
-        print("REPLY", reply)
         self._version = None
         for line in reply.split(b"\r\n"):
             if line:
@@ -235,7 +229,6 @@ class ESP_ATcontrol:
                 # get the actual version out
                 if b"AT version:" in line:
                     self._version = str(line, "utf-8")
-        print("VERSION ",self._version)
         return self._version
 
     @property
@@ -376,7 +369,7 @@ class ESP_ATcontrol:
             return [None] * 4
         replies = self.at_response("AT+CWJAP?", timeout=10).split(b"\r\n")
         for reply in replies:
-            print("REPLY ", type(reply))
+            #print("REPLY ", type(reply), str(reply))
             if not str(reply).startswith("+CWJAP:"):
                 continue
             reply = reply[7:].split(b",")
@@ -538,3 +531,203 @@ class ESP_ATcontrol:
             if reply.startswith(b"+CIPSTATE:"):
                 return self.STATUS_SOCKET_OPEN
         return self.STATUS_SOCKET_CLOSED
+
+    # *************************** SOCKET SETUP ****************************
+
+    @property
+    def cipmux(self) -> int:
+        """The IP socket multiplexing setting. 0 for one socket, 1 for multi-socket"""
+        replies = self.at_response("AT+CIPMUX?", timeout=3).split(b"\r\n")
+        for reply in replies:
+            if reply.startswith(b"+CIPMUX:"):
+                return int(reply[8:])
+        raise RuntimeError("Bad response to CIPMUX?")
+
+    def socket_connect(  # pylint: disable=too-many-branches
+        self,
+        conntype: str,
+        remote: str,
+        remote_port: int,
+        *,
+        keepalive: int = 10,
+        retries: int = 1,
+    ) -> bool:
+        """Open a socket. conntype can be TYPE_TCP, TYPE_UDP, or TYPE_SSL. Remote
+        can be an IP address or DNS (we'll do the lookup for you. Remote port
+        is integer port on other side. We can't set the local port.
+
+        Note that this method is usually called by the requests-package, which
+        does not know anything about conntype. So it is mandatory to set
+        the conntype manually before calling this method if the conntype-parameter
+        is not provided.
+
+        If requests are done using ESPAT_WiFiManager, the conntype is set there
+        depending on the protocol (http/https)."""
+
+        # if caller does not provide conntype, use default conntype from
+        # object if set, otherwise fall back to old buggy logic
+        if not conntype and self._conntype:
+            conntype = self._conntype
+        elif not conntype:
+            # old buggy code from espatcontrol_socket
+            # added here for compatibility with old code
+            if remote_port == 80:
+                conntype = self.TYPE_TCP
+            elif remote_port == 443:
+                conntype = self.TYPE_SSL
+            # to cater for MQTT over TCP
+            elif remote_port == 1883:
+                conntype = self.TYPE_TCP
+
+        # lets just do one connection at a time for now
+        if conntype == self.TYPE_UDP:
+            # always disconnect for TYPE_UDP
+            self.socket_disconnect()
+        while True:
+            stat = self.status
+            if stat in (self.STATUS_APCONNECTED, self.STATUS_SOCKETCLOSED):
+                break
+            if stat == self.STATUS_SOCKETOPEN:
+                self.socket_disconnect()
+            else:
+                time.sleep(1)
+        if not conntype in (self.TYPE_TCP, self.TYPE_UDP, self.TYPE_SSL):
+            raise RuntimeError("Connection type must be TCP, UDL or SSL")
+        cmd = (
+            'AT+CIPSTART="'
+            + conntype
+            + '","'
+            + remote
+            + '",'
+            + str(remote_port)
+            #+ ","
+            #+ str(keepalive)
+        )
+        if self._debug is True:
+            print(f"socket_connect(): Going to send command '{cmd}'")
+        replies = self.at_response(cmd, timeout=10, retries=retries).split(b"\r\n")
+        for reply in replies:
+            if reply == b"CONNECT" and (
+                conntype in (self.TYPE_TCP, self.TYPE_SSL)
+                and self.status == self.STATUS_SOCKETOPEN
+                or conntype == self.TYPE_UDP
+            ):
+                self._conntype = conntype
+                return True
+
+        return False
+
+    def socket_send(self, buffer: bytes, timeout: int = 1) -> bool:
+        """Send data over the already-opened socket, buffer must be bytes"""
+        cmd = f"AT+CIPSEND={len(buffer)}"
+        self.at_response(cmd, timeout=5, retries=1)
+        prompt = b""
+        stamp = time.monotonic()
+        while (time.monotonic() - stamp) < timeout:
+            if self._uart.in_waiting:
+                prompt += self._uart.read(1)
+                self.hw_flow(False)
+                # print(prompt)
+                if prompt[-1:] == b">":
+                    break
+            else:
+                self.hw_flow(True)
+        if not prompt or (prompt[-1:] != b">"):
+            raise RuntimeError("Didn't get data prompt for sending")
+
+        self._uart.reset_input_buffer()
+        self._uart.write(buffer)
+        if self._conntype == self.TYPE_UDP:
+            return True
+        stamp = time.monotonic()
+        response = b""
+        while (time.monotonic() - stamp) < timeout:
+            if self._uart.in_waiting:
+                response += self._uart.read(self._uart.in_waiting)
+                if response[-9:] == b"SEND OK\r\n":
+                    break
+                if response[-7:] == b"ERROR\r\n":
+                    break
+        if self._debug:
+            print("<---", response)
+        # Get newlines off front and back, then split into lines
+        return True
+
+    def socket_receive(self, timeout: int = 5) -> bytearray:
+        # pylint: disable=too-many-nested-blocks, too-many-branches
+        """Check for incoming data over the open socket, returns bytes"""
+        incoming_bytes = None
+        bundle = []
+        toread = 0
+        gc.collect()
+        i = 0  # index into our internal packet
+        stamp = time.monotonic()
+        ipd_start = b"+IPD,"
+        while (time.monotonic() - stamp) < timeout:
+            if self._uart.in_waiting:
+                stamp = time.monotonic()  # reset timestamp when there's data!
+                if not incoming_bytes:
+                    self.hw_flow(False)  # stop the flow
+                    # read one byte at a time
+                    self._ipdpacket[i] = self._uart.read(1)[0]
+                    if chr(self._ipdpacket[0]) != "+":
+                        i = 0  # keep goin' till we start with +
+                        continue
+                    i += 1
+                    # look for the IPD message
+                    if (ipd_start in self._ipdpacket) and chr(
+                        self._ipdpacket[i - 1]
+                    ) == ":":
+                        try:
+                            ipd = str(self._ipdpacket[5 : i - 1], "utf-8")
+                            incoming_bytes = int(ipd)
+                            if self._debug:
+                                print("Receiving:", incoming_bytes)
+                        except ValueError as err:
+                            raise RuntimeError(
+                                "Parsing error during receive", ipd
+                            ) from err
+                        i = 0  # reset the input buffer now that we know the size
+                    elif i > 20:
+                        i = 0  # Hmm we somehow didnt get a proper +IPD packet? start over
+                else:
+                    self.hw_flow(False)  # stop the flow
+                    # read as much as we can!
+                    toread = min(incoming_bytes - i, self._uart.in_waiting)
+                    # print("i ", i, "to read:", toread)
+                    self._ipdpacket[i : i + toread] = self._uart.read(toread)
+                    i += toread
+                    if i == incoming_bytes:
+                        # print(self._ipdpacket[0:i])
+                        gc.collect()
+                        bundle.append(self._ipdpacket[0:i])
+                        gc.collect()
+                        i = incoming_bytes = 0
+                        break  # We've received all the data. Don't wait until timeout.
+            else:  # no data waiting
+                self.hw_flow(True)  # start the floooow
+        totalsize = sum(len(x) for x in bundle)
+        ret = bytearray(totalsize)
+        i = 0
+        for x in bundle:
+            for char in x:
+                ret[i] = char
+                i += 1
+        del bundle
+        gc.collect()
+        return ret
+
+    def socket_disconnect(self) -> None:
+        """Close any open socket, if there is one"""
+        self._conntype = None
+        try:
+            self.at_response("AT+CIPCLOSE", retries=1)
+        except OKError:
+            pass  # this is ok, means we didn't have an open socket
+
+
+
+    def hw_flow(self, flag: bool) -> None:
+        """Turn on HW flow control (if available) on to allow data, or off to stop"""
+        if self._rts_pin:
+            self._rts_pin.value = not flag

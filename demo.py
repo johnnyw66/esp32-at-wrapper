@@ -64,14 +64,15 @@ async def heartbeat(led):
             led.value = not led.value
 
 def uart_write(uart, message):
-    uart.write(message.encode('utf-8'))  # Write message to UART
+    #uart.write(message.encode('utf-8'))  # Write message to UART
+    uart.write(bytes(message, 'utf-8'))
 
 async def uart_write_loop(uart, message_queue):
     print("uart_write_loop", message_queue)
     while True:
         message = await message_queue.get()  # Wait for a message from the queue
         uart_write(uart,message)  # Write message to UART
-        await asyncio.sleep(DELAY_BETWEEN_AT_COMMANDS)  # Wait for 2 seconds between messages
+        await asyncio.sleep(1)  # Wait for 2 seconds between messages
      
 
 async def uart_read_loop(uart, response_queue):
@@ -83,7 +84,7 @@ async def uart_read_loop(uart, response_queue):
             await response_queue.put(response)
             #print(f"uart_read_loop: response = {response} added to response queue - size = {response_queue.qsize()}")
             
-        await asyncio.sleep(1)  # Wait for 1 mseconds between messages
+        await asyncio.sleep(0.1)  # Wait for 1 mseconds between messages
 
 
 async def response_handler(response_queue, message_queue):

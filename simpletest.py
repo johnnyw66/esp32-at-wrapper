@@ -13,6 +13,21 @@ try:
 except ImportError:
     print("WiFi secrets are kept in secrets.py, please add them there!")
     raise
+
+
+def get_url(esp, url, port=80):
+    url = "http://example.com/index.html"
+    protocol, rest = url.split("://")
+    host, path = rest.split("/", 1)
+    path = "/" + path
+    socket = esp.socket_connect("TCP",host, port, retries=3)
+    if (socket):
+        http_request = f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode('utf-8')
+        res = esp.socket_send(http_request)
+        response= esp.socket_receive()
+        return response.decode('utf-8')
+    return None
+
 # Debug Level
 # Change the Debug Flag if you have issues with AT commands
 debugflag = True
@@ -49,7 +64,10 @@ while True:
             first_pass = False
         print("Pinging 8.8.8.8...", end="")
         print(esp.ping("8.8.8.8"))
+        res = get_url(esp, "http://example.com/index.htm")
+        print(res)
         time.sleep(10)
+
     except (ValueError, RuntimeError, espatcontrol.OKError) as e:
         print("Failed to get data, retrying\n", e)
         print("Resetting ESP module")
