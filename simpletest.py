@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: MIT
 
 import time
-import serial
 
 from espatcontrol import espatcontrol
 
+from machine import UART, Pin
 
 # Get wifi details and more from a secrets.py file
 try:
@@ -32,9 +32,9 @@ def get_url(esp, url, port=80):
 # Change the Debug Flag if you have issues with AT commands
 debugflag = True
 
-uart = serial.Serial("/dev/tty.usbserial-110", 115200, timeout=1)
 
-#uart = busio.UART(TX, RX, baudrate=11520, receiver_buffer_size=2048)
+uart = UART(0, baudrate=115200, tx=Pin(0), rx=Pin(1), rxbuf=1517, timeout=500)
+
 
 
 print("ESP AT commands")
@@ -73,4 +73,3 @@ while True:
         print("Resetting ESP module")
         esp.hard_reset()
         continue
-

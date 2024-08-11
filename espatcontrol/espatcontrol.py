@@ -25,15 +25,22 @@ with firmware - AT version:3.3.0.0(3b13d04 - ESP32C3 - May  8 2024 08:21:54)
 import gc
 import time
 #from digitalio import Direction, DigitalInOut
+from utime import *
+import time
+
 
 try:
     from typing import Optional, Dict, Union, List
-except ImportError:
+except ImportError as ie:
+    print(f"*********ImportError******** {ie}")
     pass
+
+def monotonic():
+    return ticks_ms()/1000
 
 class OKError(Exception):
     """The exception thrown when we didn't get acknowledgement to an AT command"""
-
+ 
 class ESP_ATcontrol:
     """A wrapper for AT commands to a connected ESP8266 or ESP32 module to do
     some very basic internetting. The ESP module must be pre-programmed with
@@ -80,7 +87,7 @@ class ESP_ATcontrol:
             run_baudrate = default_baudrate
         self._default_baudrate = default_baudrate
         self._run_baudrate = run_baudrate
-        self._uart.baudrate = default_baudrate
+        self.baudrate = default_baudrate
 
         self._reset_pin = reset_pin
         self._rts_pin = rts_pin
@@ -163,6 +170,7 @@ class ESP_ATcontrol:
             raise
 
     def hard_reset(self):
+        print("@TODO hard_reset()")
         pass
 
     def echo(self, echo: bool) -> None:
@@ -295,10 +303,10 @@ class ESP_ATcontrol:
         for _ in range(retries):
             self._uart.write(bytes(at_cmd, "utf-8"))
             self._uart.write(b"\x0d\x0a")
-            stamp = time.monotonic()
+            stamp = monotonic()
             response = b""
-            while (time.monotonic() - stamp) < timeout:
-                if self._uart.in_waiting > 0:
+            while (monotonic() - stamp) < timeout:
+                if self._uart.any() > 0:
                     response += self._uart.readline()
                     if response[-4:] == b"OK\r\n":
                         break
@@ -616,15 +624,19 @@ class ESP_ATcontrol:
                 return True
 
         return False
-
+    
+    def reset_input_buffer(self):
+        print("@TODO  reset_input_buffer(uart)")
+        _uart = self._uart
+        
     def socket_send(self, buffer: bytes, timeout: int = 1) -> bool:
         """Send data over the already-opened socket, buffer must be bytes"""
         cmd = f"AT+CIPSEND={len(buffer)}"
         self.at_response(cmd, timeout=5, retries=1)
         prompt = b""
-        stamp = time.monotonic()
-        while (time.monotonic() - stamp) < timeout:
-            if self._uart.in_waiting:
+        stamp = monotonic()
+        while (monotonic() - stamp) < timeout:
+            if self._uart.any():
                 prompt += self._uart.read(1)
                 self.hw_flow(False)
                 # print(prompt)
@@ -635,15 +647,16 @@ class ESP_ATcontrol:
         if not prompt or (prompt[-1:] != b">"):
             raise RuntimeError("Didn't get data prompt for sending")
 
-        self._uart.reset_input_buffer()
+        self.reset_input_buffer()
+        
         self._uart.write(buffer)
         if self._conntype == self.TYPE_UDP:
             return True
-        stamp = time.monotonic()
+        stamp = monotonic()
         response = b""
-        while (time.monotonic() - stamp) < timeout:
-            if self._uart.in_waiting:
-                response += self._uart.read(self._uart.in_waiting)
+        while (monotonic() - stamp) < timeout:
+            if self._uart.any():
+                response += self._uart.read(self._uart.any())
                 if response[-9:] == b"SEND OK\r\n":
                     break
                 if response[-7:] == b"ERROR\r\n":
@@ -661,11 +674,11 @@ class ESP_ATcontrol:
         toread = 0
         gc.collect()
         i = 0  # index into our internal packet
-        stamp = time.monotonic()
+        stamp = monotonic()
         ipd_start = b"+IPD,"
-        while (time.monotonic() - stamp) < timeout:
-            if self._uart.in_waiting:
-                stamp = time.monotonic()  # reset timestamp when there's data!
+        while (monotonic() - stamp) < timeout:
+            if self._uart.any():
+                stamp = monotonic()  # reset timestamp when there's data!
                 if not incoming_bytes:
                     self.hw_flow(False)  # stop the flow
                     # read one byte at a time
@@ -693,7 +706,7 @@ class ESP_ATcontrol:
                 else:
                     self.hw_flow(False)  # stop the flow
                     # read as much as we can!
-                    toread = min(incoming_bytes - i, self._uart.in_waiting)
+                    toread = min(incoming_bytes - i, self._uart.any())
                     # print("i ", i, "to read:", toread)
                     self._ipdpacket[i : i + toread] = self._uart.read(toread)
                     i += toread
@@ -731,3 +744,5 @@ class ESP_ATcontrol:
         """Turn on HW flow control (if available) on to allow data, or off to stop"""
         if self._rts_pin:
             self._rts_pin.value = not flag
+
+
